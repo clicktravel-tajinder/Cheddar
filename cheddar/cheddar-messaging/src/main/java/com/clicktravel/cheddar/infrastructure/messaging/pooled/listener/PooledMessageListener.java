@@ -83,12 +83,12 @@ public abstract class PooledMessageListener<T extends Message> implements Messag
     /**
      * Maximum number of attempts to delete message from queue
      */
-    private static final int MAX_DELETE_MESSAGE_ATTEMPTS = 3;
+    private static final int MAX_DELETE_MESSAGE_ATTEMPTS = 5;
 
     /**
      * Time (in milliseconds) to pause when delete message request returns an error
      */
-    private static final long DELETE_MESSAGE_ERROR_PAUSE_MILLIS = 500;
+    private static final long DELETE_MESSAGE_ERROR_PAUSE_MILLIS = 1500;
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
     private final MessageQueue<T> messageQueue;
@@ -152,7 +152,7 @@ public abstract class PooledMessageListener<T extends Message> implements Messag
                     try {
                         messages = messageQueue.receive(pollSeconds, maxReceivedMessages);
                     } catch (final MessageReceiveException e) {
-                        logger.error("Error receiving messages on queue:[" + queueName() + "]", e);
+                        logger.warn("Error receiving messages on queue:[" + queueName() + "]", e);
                         Thread.sleep(RECEIVE_MESSAGE_ERROR_PAUSE_MILLIS);
                     }
 
@@ -209,11 +209,13 @@ public abstract class PooledMessageListener<T extends Message> implements Messag
                 messageQueue.delete(message);
                 return;
             } catch (final MessageDeleteException e) {
-                logger.warn("Failed attempt to delete message from queue:[" + queueName() + "]", e);
+                logger.warn("Failed attempt to delete message with id [" + message.getMessageId() + "] from queue ["
+                        + queueName() + "]", e);
                 Thread.sleep(DELETE_MESSAGE_ERROR_PAUSE_MILLIS);
             }
         }
-        logger.error("Failed all attempts to delete message from queue:[" + queueName() + "]");
+        logger.error("Failed all attempts to delete message with id [" + message.getMessageId() + "] from queue ["
+                + queueName() + "]");
     }
 
     private void applyRateLimiter() {
