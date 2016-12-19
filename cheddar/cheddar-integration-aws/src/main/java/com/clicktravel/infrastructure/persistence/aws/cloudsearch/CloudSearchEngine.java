@@ -28,7 +28,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.amazonaws.AmazonServiceException;
-import com.amazonaws.auth.AWSCredentials;
 import com.amazonaws.services.cloudsearchdomain.AmazonCloudSearchDomain;
 import com.amazonaws.services.cloudsearchdomain.model.*;
 import com.amazonaws.services.cloudsearchv2.AmazonCloudSearch;
@@ -53,50 +52,36 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 public class CloudSearchEngine implements DocumentSearchEngine {
 
+    private static final int UPDATE_BATCH_SIZE = 1000;
+
     private final Logger logger = LoggerFactory.getLogger(getClass());
     private final DocumentConfigurationHolder documentConfigurationHolder;
     private final Map<Class<? extends Document>, DocumentConfiguration> documentConfigurations;
-    private boolean initialized = false;
     private final Map<String, AmazonCloudSearchDomain> documentServiceClients = new HashMap<>();
     private final Map<String, AmazonCloudSearchDomain> searchServiceClients = new HashMap<>();
-    private AmazonCloudSearch cloudSearchClient;
-    private AWSCredentials awsCredentials; // set to null when using default credentials provider chain
+    private final AmazonCloudSearch cloudSearchClient;
     private boolean domainEndpointsCached;
     private final JsonDocumentSearchResponseUnmarshaller fieldParser;
     private final ObjectMapper objectMapper;
 
-    @Deprecated
-    public CloudSearchEngine(final DocumentConfigurationHolder documentConfigurationHolder) {
+    public CloudSearchEngine(final DocumentConfigurationHolder documentConfigurationHolder,
+            final AmazonCloudSearch cloudSearchClient) {
         if (documentConfigurationHolder == null) {
             throw new IllegalArgumentException("Document store configuration must not be null");
         }
         this.documentConfigurationHolder = documentConfigurationHolder;
+        this.cloudSearchClient = cloudSearchClient;
         documentConfigurations = new HashMap<>();
         for (final DocumentConfiguration documentConfiguration : documentConfigurationHolder.documentConfigurations()) {
             documentConfigurations.put(documentConfiguration.documentClass(), documentConfiguration);
         }
         fieldParser = new JsonDocumentSearchResponseUnmarshaller();
         objectMapper = new ObjectMapper();
-    }
-
-    public CloudSearchEngine(final DocumentConfigurationHolder documentConfigurationHolder,
-            final AmazonCloudSearch cloudSearchClient) {
-        this(documentConfigurationHolder);
-        initialize(cloudSearchClient, null);
-    }
-
-    public void initialize(final AmazonCloudSearch cloudSearchClient, final AWSCredentials awsCredentials) {
-        this.cloudSearchClient = cloudSearchClient;
-        this.awsCredentials = awsCredentials;
-        initialized = true;
         cacheDomainEndpoints();
     }
 
     private void cacheDomainEndpoints() {
-        if (!initialized) {
-            throw new IllegalStateException("CloudSearchEngine not initialized");
-        }
-        if (!domainEndpointsCached) {
+        if (cloudSearchClient != null && !domainEndpointsCached) {
             final Set<String> managedDomains = new HashSet<>();
             for (final DocumentConfiguration documentConfiguration : documentConfigurations.values()) {
                 final String domainName = documentConfigurationHolder.schemaName() + "-"
@@ -120,9 +105,9 @@ public class CloudSearchEngine implements DocumentSearchEngine {
                             return;
                         }
                         final AmazonCloudSearchDomain documentServiceClient = AmazonCloudSearchDomainClientBuilder
-                                .build(awsCredentials, documentServiceEndpoint);
+                                .build(documentServiceEndpoint);
                         final AmazonCloudSearchDomain searchServiceClient = AmazonCloudSearchDomainClientBuilder
-                                .build(awsCredentials, searchServiceEndpoint);
+                                .build(searchServiceEndpoint);
                         documentServiceClients.put(domainStatus.getDomainName(), documentServiceClient);
                         searchServiceClients.put(domainStatus.getDomainName(), searchServiceClient);
                     }
@@ -162,25 +147,45 @@ public class CloudSearchEngine implements DocumentSearchEngine {
             final DocumentConfiguration documentConfiguration = getDocumentConfiguration(documentClass);
             final String searchDomain = documentConfigurationHolder.schemaName() + "-"
                     + documentConfiguration.namespace();
-            final BatchDocumentUpdateRequest batchDocumentUpdateRequest = new BatchDocumentUpdateRequest(searchDomain);
-
-            for (final Document document : documents) {
-                final DocumentUpdate documentUpdate = new DocumentUpdate(Type.ADD, document.getId());
-                final Collection<Field> fields = new ArrayList<>();
-                for (final IndexDefinition indexDefinition : documentConfiguration.indexDefinitions()) {
-                    final String indexName = indexDefinition.getName();
-                    final PropertyDescriptor propertyDescriptor = documentConfiguration.properties().get(indexName);
-                    if (propertyDescriptor == null) {
-                        throw new IllegalStateException("No property found for index: " + indexName);
-                    }
-                    final Field field = new Field(indexName, getPropertyValue(document, propertyDescriptor));
-                    fields.add(field);
-                }
-                documentUpdate.withFields(fields);
-                batchDocumentUpdateRequest.withDocument(documentUpdate);
+            for (final Collection<? extends Document> documentBatch : createDocumentBatches(documents)) {
+                uploadBatch(documentBatch, documentConfiguration, searchDomain);
             }
-            getDocumentServiceClient(searchDomain).uploadDocuments(uploadDocumentsRequest(batchDocumentUpdateRequest));
         }
+    }
+
+    private void uploadBatch(final Collection<? extends Document> documents,
+            final DocumentConfiguration documentConfiguration, final String searchDomain) {
+        final BatchDocumentUpdateRequest batchDocumentUpdateRequest = new BatchDocumentUpdateRequest(searchDomain);
+
+        for (final Document document : documents) {
+            final DocumentUpdate documentUpdate = new DocumentUpdate(Type.ADD, document.getId());
+            final Collection<Field> fields = new ArrayList<>();
+            for (final IndexDefinition indexDefinition : documentConfiguration.indexDefinitions()) {
+                final String indexName = indexDefinition.getName();
+                final PropertyDescriptor propertyDescriptor = documentConfiguration.properties().get(indexName);
+                if (propertyDescriptor == null) {
+                    throw new IllegalStateException("No property found for index: " + indexName);
+                }
+                final Field field = new Field(indexName, getPropertyValue(document, propertyDescriptor));
+                fields.add(field);
+            }
+            documentUpdate.withFields(fields);
+            batchDocumentUpdateRequest.withDocument(documentUpdate);
+        }
+        getDocumentServiceClient(searchDomain).uploadDocuments(uploadDocumentsRequest(batchDocumentUpdateRequest));
+    }
+
+    private List<Collection<? extends Document>> createDocumentBatches(final Collection<? extends Document> documents) {
+        final List<? extends Document> documentList = new ArrayList<>(documents);
+        final List<Collection<? extends Document>> batches = new ArrayList<>();
+
+        for (int i = 0; i < documentList.size(); i += UPDATE_BATCH_SIZE) {
+            final List<? extends Document> batch = documentList.subList(i,
+                    Math.min(documentList.size(), i + UPDATE_BATCH_SIZE));
+            batches.add(batch);
+        }
+
+        return batches;
     }
 
     private AmazonCloudSearchDomain getDocumentServiceClient(final String domainName) {

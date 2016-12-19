@@ -14,21 +14,30 @@
  * limitations under the License.
  *
  */
-package com.clicktravel.cheddar.server.flow.control;
+package com.clicktravel.infrastructure.messaging.inmemory;
 
-import java.util.concurrent.CountDownLatch;
+import com.clicktravel.cheddar.event.AbstractEvent;
 
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
+public class StubOtherEvent extends AbstractEvent {
 
-/**
- * Configuration for CountDownLatch bean controlling start of REST request processing
- */
-@Configuration
-public class RestAdapterStartLatchConfiguration {
+    public static final String type = "test.StubOtherEvent";
 
-    @Bean
-    public CountDownLatch restAdapterStartLatch() {
-        return new CountDownLatch(1); // start latch is initially blocked
+    @Override
+    public String type() {
+        return type;
+    }
+
+    @Override
+    public boolean equals(final Object obj) {
+        if (this == obj) {
+            return true;
+        }
+        if (obj == null) {
+            return false;
+        }
+        if (getClass() != obj.getClass()) {
+            return false;
+        }
+        return true;
     }
 }
